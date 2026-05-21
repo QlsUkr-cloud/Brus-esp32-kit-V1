@@ -1,0 +1,11 @@
+#ifndef BLEATTACK_H
+#define BLEATTACK_H
+
+void initBLEAttack();
+void startBLEScan();
+void startAppleJuiceSpam();
+void startBLEJammer();
+void stopBLEAttack();
+void updateBLEJammer();
+
+#endif
