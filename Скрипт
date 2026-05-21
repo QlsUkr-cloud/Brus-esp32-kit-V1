@@ -1,0 +1,524 @@
+import os
+
+# ------------------- ВМІСТ ФАЙЛІВ -------------------
+
+PLATFORMIO_INI = '''[env:esp32dev]
+platform = espressif32
+board = esp32dev
+framework = arduino
+monitor_speed = 115200
+upload_speed = 921600
+board_build.filesystem = littlefs
+
+lib_deps =
+    olikraus/U8g2@^2.35.15
+    nrf24/RF24@^1.4.11
+    h2zero/NimBLE-Arduino@^2.3.9
+    ESP32Async/ESPAsyncWebServer@^3.9.6
+    ESP32Async/AsyncTCP@^3.4.10
+    crankyoldgit/IRremoteESP8266@^2.8.6
+    bblanchon/ArduinoJson@^7.4.2
+'''
+
+ICONS_H = '''#ifndef ICONS_H
+#define ICONS_H
+
+static const unsigned char icon_wifi[] = {
+  0x00,0x00,0x00,0x00,0x00,0x00,0x78,0x00,0xFC,0x00,0x84,0x00,0x84,0x00,0x30,0x00,
+  0x30,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+};
+static const unsigned char icon_ble[] = {
+  0x00,0x00,0x00,0x00,0x10,0x00,0x38,0x00,0x10,0x00,0x28,0x00,0x44,0x00,0x44,0x00,
+  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+};
+static const unsigned char icon_nrf[] = {
+  0x00,0x00,0x00,0x00,0x3C,0x00,0x24,0x00,0x24,0x00,0x24,0x00,0x24,0x00,0x3C,0x00,
+  0x24,0x00,0x24,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+};
+static const unsigned char icon_ir[] = {
+  0x00,0x00,0x00,0x00,0x3C,0x00,0x24,0x00,0x24,0x00,0x24,0x00,0x24,0x00,0x3C,0x00,
+  0x10,0x00,0x10,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+};
+static const unsigned char icon_set[] = {
+  0x00,0x00,0x00,0x00,0x10,0x00,0x38,0x00,0x10,0x00,0x54,0x00,0x38,0x00,0x10,0x00,
+  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+};
+
+#endif
+'''
+
+MAIN_CPP = '''#include <Arduino.h>
+#include <U8g2lib.h>
+#include <Wire.h>
+#include "icons.h"
+#include "WiFiAttack.h"
+#include "BLEAttack.h"
+#include "NRF24Attack.h"
+#include "IRAttack.h"
+#include "WebServer.h"
+#include "Storage.h"
+
+// Піни кнопок
+#define BTN_UP     15
+#define BTN_DOWN   13
+#define BTN_OK     12
+#define BTN_LEFT   14
+#define BTN_RIGHT  27
+#define BTN_BACK   26
+
+// OLED
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE, 22, 21);
+
+// Рівні меню
+enum MenuLevel { MAIN, WIFI_SUB, BLE_SUB, NRF_SUB, IR_SUB, SETTINGS_SUB };
+MenuLevel currentLevel = MAIN;
+int mainIndex = 0, subIndex = 0;
+
+const char* mainMenu[] = {"WiFi", "BLE", "NRF24", "IR", "Settings"};
+const int MAIN_SIZE = 5;
+
+const char* wifiSub[] = {"Scan AP", "Deauth Attack", "Beacon Spam", "Evil Twin",
+                         "Handshake Sniffer", "WiFi Jammer", "Stop Attack", "Back"};
+const int WIFI_SUB_SIZE = 8;
+
+const char* bleSub[] = {"Scan BLE", "AppleJuice Spam", "BLE Jammer", "Stop Attack", "Back"};
+const int BLE_SUB_SIZE = 5;
+
+const char* nrfSub[] = {"Scan NRF", "NRF Jammer", "NRF Send", "Stop Attack", "Back"};
+const int NRF_SUB_SIZE = 5;
+
+const char* irSub[] = {"Record", "Send RAW", "TV1", "TV2", "TV3", "TV4", "TV5", "TV6", "Send Custom", "Back"};
+const int IR_SUB_SIZE = 10;
+
+const char* setSub[] = {"WiFi AP On/Off", "View Passwords", "View Handshakes", "Format FS", "Info", "Reboot", "Back"};
+const int SET_SUB_SIZE = 7;
+
+// Прототипи функцій
+void drawMainMenu();
+void drawSubMenu(const char* items[], int size, int selected, const char* title);
+void handleOk();
+void handleBack();
+void checkButtons();
+int getSubSize();
+const char** getSubItems();
+const char* getSubTitle();
+void showMessage(const char* msg, int delayMs = 1500);
+
+unsigned long lastBtn = 0;
+#define DEBOUNCE 200
+bool btn(int pin) {
+    if (digitalRead(pin) == LOW && millis() - lastBtn > DEBOUNCE) {
+        lastBtn = millis();
+        return true;
+    }
+    return false;
+}
+
+// ========== SETUP ==========
+void setup() {
+    Serial.begin(115200);
+    pinMode(BTN_UP, INPUT_PULLUP);
+    pinMode(BTN_DOWN, INPUT_PULLUP);
+    pinMode(BTN_OK, INPUT_PULLUP);
+    pinMode(BTN_LEFT, INPUT_PULLUP);
+    pinMode(BTN_RIGHT, INPUT_PULLUP);
+    pinMode(BTN_BACK, INPUT_PULLUP);
+    Wire.begin(21, 22);
+    u8g2.begin();
+    u8g2.setContrast(200);
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_logisoso24_tr);
+    u8g2.drawStr(10, 40, "BRUCE FULL");
+    u8g2.sendBuffer();
+    delay(1500);
+    initStorage();
+    initWiFiAttack();
+    initBLEAttack();
+    initNRF24Attack();
+    initIRAttack();
+    initWebServer();
+    drawMainMenu();
+}
+
+// ========== LOOP ==========
+void loop() {
+    checkButtons();
+    updateWiFiJammer();
+    updateBLEJammer();
+    updateNRFJammer();
+    delay(20);
+}
+
+// ========== ОБРОБКА КНОПОК ==========
+void checkButtons() {
+    if (btn(BTN_LEFT)) {
+        if (currentLevel == MAIN) {
+            mainIndex = (mainIndex - 1 + MAIN_SIZE) % MAIN_SIZE;
+            drawMainMenu();
+        }
+    }
+    else if (btn(BTN_RIGHT)) {
+        if (currentLevel == MAIN) {
+            mainIndex = (mainIndex + 1) % MAIN_SIZE;
+            drawMainMenu();
+        }
+    }
+    else if (btn(BTN_UP)) {
+        if (currentLevel != MAIN) {
+            subIndex = (subIndex - 1 + getSubSize()) % getSubSize();
+            drawSubMenu(getSubItems(), getSubSize(), subIndex, getSubTitle());
+        }
+    }
+    else if (btn(BTN_DOWN)) {
+        if (currentLevel != MAIN) {
+            subIndex = (subIndex + 1) % getSubSize();
+            drawSubMenu(getSubItems(), getSubSize(), subIndex, getSubTitle());
+        }
+    }
+    else if (btn(BTN_OK)) {
+        handleOk();
+    }
+    else if (btn(BTN_BACK)) {
+        handleBack();
+    }
+}
+
+void handleBack() {
+    if (currentLevel != MAIN) {
+        stopWiFiAttack();
+        stopBLEAttack();
+        stopNRFAttack();
+        stopIRAttack();
+        currentLevel = MAIN;
+        drawMainMenu();
+    }
+}
+
+void handleOk() {
+    if (currentLevel == MAIN) {
+        switch (mainIndex) {
+            case 0: currentLevel = WIFI_SUB; subIndex=0; drawSubMenu(wifiSub, WIFI_SUB_SIZE, 0, "WiFi Attacks"); break;
+            case 1: currentLevel = BLE_SUB; subIndex=0; drawSubMenu(bleSub, BLE_SUB_SIZE, 0, "BLE Attacks"); break;
+            case 2: currentLevel = NRF_SUB; subIndex=0; drawSubMenu(nrfSub, NRF_SUB_SIZE, 0, "NRF24 Attacks"); break;
+            case 3: currentLevel = IR_SUB; subIndex=0; drawSubMenu(irSub, IR_SUB_SIZE, 0, "IR Attacks"); break;
+            case 4: currentLevel = SETTINGS_SUB; subIndex=0; drawSubMenu(setSub, SET_SUB_SIZE, 0, "Settings"); break;
+        }
+    }
+    else {
+        switch (currentLevel) {
+            case WIFI_SUB:
+                switch (subIndex) {
+                    case 0: startWiFiScan(); break;
+                    case 1: startWiFiDeauth(); break;
+                    case 2: startWiFiBeaconSpam(); break;
+                    case 3: startEvilTwin(); break;
+                    case 4: startHandshakeSniffer(); break;
+                    case 5: startWiFiJammer(); break;
+                    case 6: stopWiFiAttack(); break;
+                    case 7: currentLevel = MAIN; drawMainMenu(); break;
+                } break;
+            case BLE_SUB:
+                switch (subIndex) {
+                    case 0: startBLEScan(); break;
+                    case 1: startAppleJuiceSpam(); break;
+                    case 2: startBLEJammer(); break;
+                    case 3: stopBLEAttack(); break;
+                    case 4: currentLevel = MAIN; drawMainMenu(); break;
+                } break;
+            case NRF_SUB:
+                switch (subIndex) {
+                    case 0: startNRFScan(); break;
+                    case 1: startNRFJammer(); break;
+                    case 2: startNRFSend(); break;
+                    case 3: stopNRFAttack(); break;
+                    case 4: currentLevel = MAIN; drawMainMenu(); break;
+                } break;
+            case IR_SUB:
+                switch (subIndex) {
+                    case 0: recordIRSignal(); break;
+                    case 1: sendRawIR(); break;
+                    case 2: sendIRButton(1); break;
+                    case 3: sendIRButton(2); break;
+                    case 4: sendIRButton(3); break;
+                    case 5: sendIRButton(4); break;
+                    case 6: sendIRButton(5); break;
+                    case 7: sendIRButton(6); break;
+                    case 8: sendCustomIR(); break;
+                    case 9: currentLevel = MAIN; drawMainMenu(); break;
+                } break;
+            case SETTINGS_SUB:
+                switch (subIndex) {
+                    case 0: toggleWiFiAP(); break;
+                    case 1: showPasswords(); break;
+                    case 2: showHandshakes(); break;
+                    case 3: formatLittleFS(); break;
+                    case 4: showDeviceInfo(); break;
+                    case 5: ESP.restart(); break;
+                    case 6: currentLevel = MAIN; drawMainMenu(); break;
+                } break;
+        }
+        // Якщо вибрано не "Back" і не "Stop Attack" – залишаємось в підменю
+        bool stay = !(subIndex == 7 || subIndex == 4 || subIndex == 4 || subIndex == 9 || subIndex == 6);
+        if (stay) {
+            drawSubMenu(getSubItems(), getSubSize(), subIndex, getSubTitle());
+        }
+    }
+}
+
+int getSubSize() {
+    switch(currentLevel) {
+        case WIFI_SUB: return WIFI_SUB_SIZE;
+        case BLE_SUB: return BLE_SUB_SIZE;
+        case NRF_SUB: return NRF_SUB_SIZE;
+        case IR_SUB: return IR_SUB_SIZE;
+        case SETTINGS_SUB: return SET_SUB_SIZE;
+        default: return 0;
+    }
+}
+const char** getSubItems() {
+    switch(currentLevel) {
+        case WIFI_SUB: return wifiSub;
+        case BLE_SUB: return bleSub;
+        case NRF_SUB: return nrfSub;
+        case IR_SUB: return irSub;
+        case SETTINGS_SUB: return setSub;
+        default: return nullptr;
+    }
+}
+const char* getSubTitle() {
+    switch(currentLevel) {
+        case WIFI_SUB: return "WiFi Attacks";
+        case BLE_SUB: return "BLE Attacks";
+        case NRF_SUB: return "NRF24 Attacks";
+        case IR_SUB: return "IR Attacks";
+        case SETTINGS_SUB: return "Settings";
+        default: return "";
+    }
+}
+void showMessage(const char* msg, int delayMs) {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_6x13_tr);
+    u8g2.drawStr(2, 10, msg);
+    u8g2.sendBuffer();
+    delay(delayMs);
+    if (currentLevel == MAIN) drawMainMenu();
+    else drawSubMenu(getSubItems(), getSubSize(), subIndex, getSubTitle());
+}
+
+// ========== МАЛЮВАННЯ МЕНЮ ==========
+void drawMainMenu() {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_6x13_tr);
+    u8g2.drawStr(2, 10, "BRUCE FULL");
+    u8g2.drawLine(0, 12, 128, 12);
+    int prev = (mainIndex - 1 + MAIN_SIZE) % MAIN_SIZE;
+    int next = (mainIndex + 1) % MAIN_SIZE;
+    const unsigned char* prevIcon = (prev==0?icon_wifi:(prev==1?icon_ble:(prev==2?icon_nrf:(prev==3?icon_ir:icon_set))));
+    const unsigned char* nextIcon = (next==0?icon_wifi:(next==1?icon_ble:(next==2?icon_nrf:(next==3?icon_ir:icon_set))));
+    const unsigned char* currIcon = (mainIndex==0?icon_wifi:(mainIndex==1?icon_ble:(mainIndex==2?icon_nrf:(mainIndex==3?icon_ir:icon_set))));
+    u8g2.drawXBM(2, 20, 32, 32, prevIcon);
+    u8g2.drawXBM(94, 20, 32, 32, nextIcon);
+    u8g2.drawRFrame(44, 14, 40, 40, 4);
+    u8g2.drawXBM(48, 18, 32, 32, currIcon);
+    u8g2.setFont(u8g2_font_7x13B_tr);
+    int nameW = u8g2.getStrWidth(mainMenu[mainIndex]);
+    u8g2.drawStr((128-nameW)/2, 62, mainMenu[mainIndex]);
+    u8g2.sendBuffer();
+}
+void drawSubMenu(const char* items[], int size, int selected, const char* title) {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_6x13_tr);
+    u8g2.drawStr(2, 10, title);
+    u8g2.drawLine(0, 12, 128, 12);
+    int start = max(0, selected - 2);
+    int end = min(size, start + 5);
+    for (int i = start; i < end; i++) {
+        u8g2.setCursor(10, 25 + (i-start)*9);
+        if (i == selected) u8g2.print(">");
+        else u8g2.print(" ");
+        u8g2.print(items[i]);
+    }
+    u8g2.sendBuffer();
+}
+'''
+
+# ---------- Заглушки для модулів ----------
+WIFI_H = '''#ifndef WIFIATTACK_H
+#define WIFIATTACK_H
+
+void initWiFiAttack();
+void startWiFiScan();
+void startWiFiDeauth();
+void startWiFiBeaconSpam();
+void startEvilTwin();
+void startHandshakeSniffer();
+void startWiFiJammer();
+void stopWiFiAttack();
+void updateWiFiJammer();
+
+#endif
+'''
+
+WIFI_CPP = '''#include "WiFiAttack.h"
+#include <Arduino.h>
+
+void initWiFiAttack() { Serial.println("WiFiAttack init OK"); }
+void startWiFiScan() { Serial.println("WiFi Scan (placeholder)"); }
+void startWiFiDeauth() { Serial.println("Deauth attack (placeholder)"); }
+void startWiFiBeaconSpam() { Serial.println("Beacon spam (placeholder)"); }
+void startEvilTwin() { Serial.println("Evil Twin (placeholder)"); }
+void startHandshakeSniffer() { Serial.println("Handshake sniffer (placeholder)"); }
+void startWiFiJammer() { Serial.println("WiFi Jammer started"); }
+void stopWiFiAttack() { Serial.println("WiFi attack stopped"); }
+void updateWiFiJammer() { }
+'''
+
+BLE_H = '''#ifndef BLEATTACK_H
+#define BLEATTACK_H
+
+void initBLEAttack();
+void startBLEScan();
+void startAppleJuiceSpam();
+void startBLEJammer();
+void stopBLEAttack();
+void updateBLEJammer();
+
+#endif
+'''
+
+BLE_CPP = '''#include "BLEAttack.h"
+#include <Arduino.h>
+
+void initBLEAttack() { Serial.println("BLEAttack init OK"); }
+void startBLEScan() { Serial.println("BLE Scan (placeholder)"); }
+void startAppleJuiceSpam() { Serial.println("AppleJuice Spam (placeholder)"); }
+void startBLEJammer() { Serial.println("BLE Jammer started"); }
+void stopBLEAttack() { Serial.println("BLE attack stopped"); }
+void updateBLEJammer() { }
+'''
+
+NRF_H = '''#ifndef NRF24ATTACK_H
+#define NRF24ATTACK_H
+
+void initNRF24Attack();
+void startNRFScan();
+void startNRFJammer();
+void startNRFSend();
+void stopNRFAttack();
+void updateNRFJammer();
+
+#endif
+'''
+
+NRF_CPP = '''#include "NRF24Attack.h"
+#include <Arduino.h>
+
+void initNRF24Attack() { Serial.println("NRF24Attack init OK"); }
+void startNRFScan() { Serial.println("NRF Scan (placeholder)"); }
+void startNRFJammer() { Serial.println("NRF Jammer started"); }
+void startNRFSend() { Serial.println("NRF Send (placeholder)"); }
+void stopNRFAttack() { Serial.println("NRF attack stopped"); }
+void updateNRFJammer() { }
+'''
+
+IR_H = '''#ifndef IRATTACK_H
+#define IRATTACK_H
+
+void initIRAttack();
+void recordIRSignal();
+void sendRawIR();
+void sendIRButton(int btn);
+void sendCustomIR();
+void stopIRAttack();
+
+#endif
+'''
+
+IR_CPP = '''#include "IRAttack.h"
+#include <Arduino.h>
+
+void initIRAttack() { Serial.println("IRAttack init OK"); }
+void recordIRSignal() { Serial.println("Record IR (placeholder)"); }
+void sendRawIR() { Serial.println("Send RAW IR (placeholder)"); }
+void sendIRButton(int btn) { Serial.printf("Send IR TV button %d\\n", btn); }
+void sendCustomIR() { Serial.println("Send Custom IR (placeholder)"); }
+void stopIRAttack() { Serial.println("IR attack stopped"); }
+'''
+
+WEB_H = '''#ifndef WEBSERVER_H
+#define WEBSERVER_H
+
+void initWebServer();
+void toggleWiFiAP();
+void showPasswords();
+void showHandshakes();
+void formatLittleFS();
+void showDeviceInfo();
+
+#endif
+'''
+
+WEB_CPP = '''#include "WebServer.h"
+#include <Arduino.h>
+
+void initWebServer() { Serial.println("WebServer init OK"); }
+void toggleWiFiAP() { Serial.println("Toggle WiFi AP"); }
+void showPasswords() { Serial.println("Show passwords"); }
+void showHandshakes() { Serial.println("Show handshakes"); }
+void formatLittleFS() { Serial.println("Format LittleFS"); }
+void showDeviceInfo() { Serial.println("Device info"); }
+'''
+
+STORAGE_H = '''#ifndef STORAGE_H
+#define STORAGE_H
+
+void initStorage();
+
+#endif
+'''
+
+STORAGE_CPP = '''#include "Storage.h"
+#include <Arduino.h>
+
+void initStorage() { Serial.println("Storage init OK"); }
+'''
+
+# ------------------- СТВОРЕННЯ ПРОЕКТУ -------------------
+def create_project():
+    base = "Bruce_Full"
+    if not os.path.exists(base):
+        os.makedirs(base)
+    # Створюємо структуру папок
+    folders = [
+        "src", "include", "data/portal",
+        "lib/WiFiAttack", "lib/BLEAttack", "lib/NRF24Attack",
+        "lib/IRAttack", "lib/WebServer", "lib/Storage"
+    ]
+    for f in folders:
+        os.makedirs(os.path.join(base, f), exist_ok=True)
+    # Файли
+    with open(os.path.join(base, "platformio.ini"), "w") as f:
+        f.write(PLATFORMIO_INI)
+    with open(os.path.join(base, "include", "icons.h"), "w") as f:
+        f.write(ICONS_H)
+    with open(os.path.join(base, "src", "main.cpp"), "w") as f:
+        f.write(MAIN_CPP)
+    # Модулі
+    modules = [
+        ("WiFiAttack", WIFI_H, WIFI_CPP),
+        ("BLEAttack", BLE_H, BLE_CPP),
+        ("NRF24Attack", NRF_H, NRF_CPP),
+        ("IRAttack", IR_H, IR_CPP),
+        ("WebServer", WEB_H, WEB_CPP),
+        ("Storage", STORAGE_H, STORAGE_CPP)
+    ]
+    for name, h_content, cpp_content in modules:
+        with open(os.path.join(base, "lib", name, f"{name}.h"), "w") as f:
+            f.write(h_content)
+        with open(os.path.join(base, "lib", name, f"{name}.cpp"), "w") as f:
+            f.write(cpp_content)
+    print(f"✅ Проект створено в папці {os.path.abspath(base)}")
+    print("Тепер відкрий цю папку в VS Code, натисни Clean, потім Build.")
+
+if __name__ == "__main__":
+    create_project()
